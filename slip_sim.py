@@ -194,8 +194,12 @@ def create_modified_grf_xml(original_xml, modified_mot, output_xml):
         f.write(content)
 
 
-def run_forward_simulation(args, slip_time):
-    """Run forward dynamics with frozen CMC controls and modified GRF."""
+def run_forward_simulation(args, slip_time, use_correction=False):
+    """Run forward dynamics with frozen CMC controls and modified GRF.
+
+    If use_correction=True, adds a CorrectionController (PD feedback)
+    that tracks the CMC states trajectory, preventing open-loop drift.
+    """
     output_dir = args.output_dir
     t_final = slip_time + args.duration
 
@@ -241,22 +245,39 @@ def run_forward_simulation(args, slip_time):
     with open(setup_xml, "r") as f:
         content = f.read()
 
-    # Insert the controller set before the closing </ForwardTool> tag
-    controller_xml = f"""		<ControllerSet name="Controllers">
+    # Replace the empty ControllerSet that ForwardTool serializes with our
+    # populated one. The empty block looks like:
+    #   <ControllerSet name="Controllers">
+    #       <objects />
+    #       <groups />
+    #   </ControllerSet>
+    import re
+
+    correction_xml = ""
+    if use_correction:
+        correction_xml = """
+				<CorrectionController name="">
+					<actuator_list> </actuator_list>
+					<isDisabled> false </isDisabled>
+					<kp> 16.0 </kp>
+					<kv> 8.0 </kv>
+				</CorrectionController>"""
+
+    controller_xml = f"""<ControllerSet name="Controllers">
 			<objects>
 				<ControlSetController name="">
 					<actuator_list> </actuator_list>
 					<isDisabled> false </isDisabled>
 					<controls_file> {args.cmc_controls} </controls_file>
-				</ControlSetController>
+				</ControlSetController>{correction_xml}
 			</objects>
-			<groups/>
+			<groups />
 		</ControllerSet>"""
 
-    content = content.replace(
-        "</ForwardTool>",
-        controller_xml + "\n\t</ForwardTool>",
-    )
+    # Match the empty ControllerSet block (with self-closing or separate tags)
+    empty_pattern = r'<ControllerSet name="Controllers">\s*<objects\s*/>\s*<groups\s*/>\s*</ControllerSet>'
+    # Use a lambda to avoid re interpreting backslashes in the replacement
+    content = re.sub(empty_pattern, lambda m: controller_xml, content)
 
     with open(setup_xml, "w") as f:
         f.write(content)
@@ -415,7 +436,8 @@ def main():
     normal_args_for_fwd.grf_xml = normal_grf_xml
 
     # Point the external loads to the original GRF
-    run_forward_simulation(normal_args_for_fwd, slip_time)
+    # Enable CorrectionController so normal sim tracks CMC kinematics
+    run_forward_simulation(normal_args_for_fwd, slip_time, use_correction=True)
 
     # Step 6: Compare kinematics
     print("\n--- Step 6: Comparing kinematics ---")
